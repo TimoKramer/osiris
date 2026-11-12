@@ -1,0 +1,98 @@
+name: Tag release
+
+on:
+  push:
+    branches: [master]
+    paths: [version.php]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compare version with previous state
+        id: version
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          read_const() { php -r 'include $argv[1]; $v = constant($argv[2]); echo is_bool($v) ? var_export($v, true) : $v;' "$1" "$2"; }
+
+          new_version=$(read_const version.php OSIRIS_VERSION)
+          beta=$(read_const version.php OSIRIS_BETA)
+
+          # BEFORE is all zeros when the push created the branch
+          if [ -z "${BEFORE//0/}" ] || ! git cat-file -e "$BEFORE" 2>/dev/null; then
+            BEFORE=HEAD~1
+          fi
+          git show "$BEFORE:version.php" > "$RUNNER_TEMP/version.old.php"
+          old_version=$(read_const "$RUNNER_TEMP/version.old.php" OSIRIS_VERSION)
+
+          tag="v$new_version"
+          echo "old=$old_version new=$new_version beta=$beta"
+
+          release=false
+          if [ "$beta" = "false" ] \
+            && php -r 'exit(version_compare($argv[1], $argv[2], ">") ? 0 : 1);' "$new_version" "$old_version" \
+            && ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            release=true
+          fi
+
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: '8.4'
+          extensions: mongodb
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-dev
+
+      - name: Run tests
+        run: |
+          for t in tests/*.php; do
+            echo "::group::$t"
+            php "$t"
+            echo "::endgroup::"
+          done
+
+      - name: Build Docker image
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          docker build -f prod.Dockerfile \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.version=${TAG#v}" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            -t "$image:${TAG#v}" -t "$image:latest" .
+
+      - name: Push Docker image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${TAG#v}"
+          docker push "$IMAGE:latest"
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
