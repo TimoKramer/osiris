@@ -221,19 +221,8 @@ class LDAPInterface
             return null;
         }
 
-        $key_active = 'useraccountcontrol';
-        $key_expires = 'accountexpires';
-
         $res = array();
         foreach ($entries as $entry) {
-            $accountControl = isset($entry[$key_active][0]) ? (int)$entry[$key_active][0] : 0;
-            $accountExpires = isset($entry[$key_expires][0]) ? (int)$entry[$key_expires][0] : 0;
-
-            $isDisabled = ($accountControl & 2); // 2 = ACCOUNTDISABLE
-            $isExpired = ($accountExpires != 0 && $accountExpires <= time() * 10000000 + 116444736000000000);
-
-            $active = !$isDisabled && !$isExpired;
-
             $username = $entry[$this->userkey][0] ?? null;
             $uniqueid = $entry[$this->uniqueid][0] ?? null;
             if ($this->uniqueid == 'objectguid') {
@@ -242,7 +231,7 @@ class LDAPInterface
             $res[] = [
                 'username' => $username,
                 'uniqueid' => $uniqueid,
-                'is_active' => $active
+                'is_active' => $this->isActive($entry)
             ];
         }
 
@@ -373,8 +362,7 @@ class LDAPInterface
         $person['orcid'] = null;
         $person['formalname'] = $person['last'] . ', ' . $person['first'];
         $person['academic_title'] = null;
-        $accountControl = isset($user['useraccountcontrol'][0]) ? (int)$user['useraccountcontrol'][0] : 0;
-        $person['is_active'] = boolval(!($accountControl & 2)); // 2 entspricht ACCOUNTDISABLE
+        $person['is_active'] = $this->isActive($user);
 
         $person['created'] = date('Y-m-d');
         $person['roles'] = [];
@@ -580,6 +568,19 @@ class LDAPInterface
         }
 
         return true;
+    }
+
+    // Entries without the AD attributes (e.g. OpenLDAP) count as active.
+    private function isActive(array $entry): bool
+    {
+        $accountControl = isset($entry['useraccountcontrol'][0]) ? (int)$entry['useraccountcontrol'][0] : 0;
+        $accountExpires = isset($entry['accountexpires'][0]) ? (int)$entry['accountexpires'][0] : 0;
+
+        $isDisabled = ($accountControl & 2) !== 0; // ACCOUNTDISABLE
+        // accountExpires is in 100ns intervals since 1601-01-01; 0 and PHP_INT_MAX mean "never"
+        $isExpired = $accountExpires > 0 && $accountExpires <= time() * 10000000 + 116444736000000000;
+
+        return !$isDisabled && !$isExpired;
     }
 
     public function convertObjectGUID($bin)
