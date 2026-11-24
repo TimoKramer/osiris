@@ -49,6 +49,10 @@ class LDAPInterface
         }
 
         $this->attributes = array_values($this->keys);
+        if (!$this->openldap) {
+            // read by fetchUserActivity() and newUser() to detect disabled/expired accounts
+            array_push($this->attributes, 'useraccountcontrol', 'accountexpires');
+        }
         $this->connect();
     }
 
